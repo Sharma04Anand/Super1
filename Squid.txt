@@ -1,0 +1,72 @@
+Install Squid
+Type:
+sudo apt update
+sudo apt install squid -y
+This installs Squid and starts it automatically.
+Check Squid Status
+Type:
+systemctl status squid
+You should see active (running).
+Open Squid Configuration File
+Type:
+sudo nano /etc/squid/squid.conf
+We only modify a few lines.
+Allow Your Local Network to Use the Proxy
+Find the line:
+acl localnet src 192.168.0.0/16
+If your network is 192.168.1.0/24, it already fits.
+If not, add your network:
+acl localnet src 192.168.1.0/24
+Define Allowed HTTP Ports
+Find the “Safe ports” section and ensure the following exist:
+acl Safe_ports port 80        # http
+acl Safe_ports port 443       # https
+These are the ports Squid will allow.
+Allow Users in Local Network to Browse Via Proxy
+Find the section:
+http_access allow localnet
+http_access allow localhost
+If "deny all" appears before these, move "deny all" to the end.
+Set Squid Proxy Port
+Default is port 3128.
+In squid.conf confirm:
+http_port 3128
+Restart Squid
+Type:
+sudo systemctl restart squid
+Configure Browser to Use Proxy
+In Firefox (example):
+Go to Settings → Network Settings → Manual Proxy Configuration
+Enter:
+HTTP Proxy: 127.0.0.1
+Port: 3128
+Tick Use this proxy for all protocols.
+Test the Proxy
+Try opening a website.
+It should work only through Squid.
+To confirm, type in terminal:
+sudo tail -f /var/log/squid/access.log
+You will see entries like:
+TCP_MISS/200 GET http://google.com/
+This means the proxy is filtering and logging.
+
+Limit Bandwidth (Traffic Shaping)
+Example: Limit all downloads to 200 KB/s
+In squid.conf:
+delay_pools 1
+delay_class 1 2
+delay_parameters 1 200000/200000 200000/200000
+acl allusers src all
+delay_access 1 allow allusers
+Restart Squid:
+sudo systemctl restart squid
+
+
+Block File Types (Content-Type Filtering)
+Block files such as .mp3, .exe, .mp4, etc.
+In squid.conf:
+acl bad_files url_regex -i \.mp3$ \.exe$ \.mp4$
+http_access deny bad_files
+Restart Squid.
+Now try downloading an EXE — Squid will block it.
+

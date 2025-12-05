@@ -1,0 +1,122 @@
+IP tables
+Check kernel modules that support iptables:
+sudo lsmod | egrep 'ip_tables|nf_conntrack|xt_' || true
+This lists loaded kernel modules related to Netfilter (ip_tables, connection tracking modules, extensions). 
+Type:
+sudo iptables -L -v -n
+sudo iptables -L -n -v --line-numbers
+sudo iptables -S
+This shows all existing rules and whether the firewall is active.
+		sudo iptables -t filter -L -n --line-numbers
+sudo iptables -t nat    -L -n --line-numbers
+sudo iptables -t mangle -L -n --line-numbers
+sudo iptables -t raw    -L -n --line-numbers
+sudo iptables -t security -L -n --line-numbers || true
+
+iptables port forwarding
+
+Your network:
+
+
+Machine
+Purpose
+IP
+Kali #1: Firewall with iptables 192.168.1.17
+Kali #2: Internal server (SSH target) 192.168.1.13
+Windows 10: Client 192.168.1.6
+
+
+
+
+
+
+
+
+
+
+
+
+Overview of the lab
+You will configure:
+On Kali #1 (192.168.1.17) → act as firewall
+Enable forwarding
+Add DNAT port-forwarding rule
+Add FORWARD chain rules
+OPTIONAL: Enable NAT
+Save rules
+On Kali #2 (192.168.1.13) → act as internal SSH/web server
+Start an SSH service (or simple nc listener for demo)
+On Windows 10 (192.168.1.6) → act as client
+Connect to forwarded port on Kali #1
+Verify it reaches Kali #2
+
+Kali#1 configuration:
+
+Enable IP forwarding
+sudo sysctl -w net.ipv4.ip_forward=1
+echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf
+
+
+
+
+
+
+
+
+
+
+
+Enable NAT
+	sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE  
+		(Replace eth0 with actual external interface)
+
+Forward port 2222 on firewall → port 22 on internal Kali #2
+	sudo iptables -t nat -A PREROUTING -p tcp -d 192.168.1.17 --dport 2222 -j DNAT --to-destination 192.168.1.13:22
+
+Allow NEW SSH connections to Kali#2
+	sudo iptables -A FORWARD -p tcp -d 192.168.1.13 --dport 22 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+
+Allow return traffic
+	sudo iptables -A FORWARD -p tcp -s 192.168.1.13 --sport 22 -m conntrack --ctstate ESTABLISHED -j ACCEPT
+
+Save iptables rules (optional)
+	sudo iptables-save | sudo tee /etc/iptables.rules
+
+Kali#2 configuration:
+
+	sudo systemctl start ssh
+sudo systemctl enable ssh
+
+From Windows client:
+		ssh 192.168.1.13
+	Connect to Kali #1 on forwarded port 2222
+		ssh -p 2222 user@192.168.1.17
+	
+You will be connected to 192.168.1.13 using port forwarding on Kali#1.
+
+Test & Verification:
+		sudo iptables -t nat -nL PREROUTING --line-numbers
+		sudo conntrack -L | grep 192.168.1.13
+
+
+
+Packet Filtering Legacy:
+Packet Filtering Firewall (Legacy)
+Goal: Show that legacy firewall only blocks IP/Port, nothing more.
+Steps:
+On a Linux/Kali VM, run a simple web server:
+python3 -m http.server 8080
+From another machine, access:
+http://<server-ip>:8080
+Now create a packet filter rule (iptables example):
+sudo iptables -A INPUT -p tcp --dport 8080 -j DROP
+Test again → connection fails.
+
+
+Block Ping
+Block Pings (ICMP Echo Requests)
+To block ping to your machine:
+sudo iptables -A INPUT -p icmp --icmp-type echo-request -j DROP
+To test:
+ping 192.168.1.x
+It should not respond.

