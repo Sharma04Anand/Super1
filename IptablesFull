@@ -1,0 +1,524 @@
+Lab: Packet-Filtering & Proxy Firewall using iptables 
+
+Objective
+To configure a packet-filtering firewall using iptables, configure a proxy firewall using Squid, and compare their behavior in controlling network traffic.
+Lab Overview
+You will perform:
+Configure iptables to allow/block traffic based on IP and ports.
+Install Squid and configure it as an HTTP proxy firewall.
+Compare how each protects the system.
+Note: You may replace the IP with your actual IP using:
+ip a
+PART A: CONFIGURE PACKET-FILTERING FIREWALL USING iptables
+
+View Current iptables Rules
+Check kernel modules that support iptables:
+sudo lsmod | egrep 'ip_tables|nf_conntrack|xt_' || true
+This lists loaded kernel modules related to Netfilter (ip_tables, connection tracking modules, extensions). 
+Type:
+sudo iptables -L -v -n
+sudo iptables -L -n -v --line-numbers
+sudo iptables -S
+This shows all existing rules and whether the firewall is active.
+		sudo iptables -t filter -L -n --line-numbers
+sudo iptables -t nat    -L -n --line-numbers
+sudo iptables -t mangle -L -n --line-numbers
+sudo iptables -t raw    -L -n --line-numbers
+sudo iptables -t security -L -n --line-numbers || true
+
+Note: When a packet arrives from the network, it first traverses raw PREROUTING, then mangle PREROUTING, then nat PREROUTING (for DNAT), then the routing decision is made. If the packet is destined for the local machine, it goes to the filter INPUT chain; if it is to be forwarded, it goes to the filter FORWARD chain. Locally generated packets go through raw OUTPUT, mangle OUTPUT, nat OUTPUT (if needed), then filter OUTPUT, and finally mangle POSTROUTING and nat POSTROUTING before leaving the host.
+
+INPUT chain lab (packets destined to this host):
+
+Explicit rules in the INPUT chain to allow SSH, allow HTTP, and drop everything else:
+
+# flush previous rules to start clean (only do this on a test host)
+sudo iptables -F
+
+# default policy to DROP (safe: allow SSH)
+sudo iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+sudo iptables -A INPUT -p tcp --dport 80 -j ACCEPT
+sudo iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+sudo iptables -P INPUT DROP
+sudo iptables -P FORWARD DROP
+sudo iptables -P OUTPUT ACCEPT
+
+Test and observation:
+From client, curl http://<server-ip> should succeed because we allowed port 80.
+From client, telnet <server-ip> 22 should succeed (SSH) and other ports like 8080 should be blocked.
+
+OUTPUT chain lab
+Used for packets that are created by the local host and are going out to any external network interface.
+
+Restrict outgoing connections by creating rules in the OUTPUT chain so that only DNS and HTTP requests are allowed from this host.
+
+# reset
+sudo iptables -F
+
+# allow established replies
+sudo iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# allow DNS (UDP 53 and TCP 53 for large responses/zone transfers)
+sudo iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
+sudo iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
+
+# allow HTTP and HTTPS outbound
+sudo iptables -A OUTPUT -p tcp --dport 80 -j ACCEPT
+sudo iptables -A OUTPUT -p tcp --dport 443 -j ACCEPT
+
+# drop all other outbound traffic
+sudo iptables -P OUTPUT DROP
+sudo iptables -P INPUT ACCEPT
+sudo iptables -P FORWARD DROP
+
+Test and observation:
+On the host, run curl https://example.com — it should succeed.
+Try ssh user@remote from the host — it should fail because outbound port 22 is not allowed.1
+Revert:
+sudo iptables -P OUTPUT ACCEPT
+sudo iptables -F
+
+FORWARD chain lab (routing/packet forwarding)
+
+Enable IPv4 forwarding and set up a simple two-network forwarding test through this host.
+
+# Enable IP forwarding temporarily
+sudo sysctl -w net.ipv4.ip_forward=1
+
+# Example: assume two NICs on the router/test host: eth0 (192.168.10.1) and eth1 (192.168.20.1)
+# Clients: 192.168.10.100 and 192.168.20.100 on separate VMs or networks
+
+# Clear rules
+sudo iptables -F
+
+# Allow forwarding for established connections
+sudo iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# Allow forwarding from net10 to net20
+sudo iptables -A FORWARD -s 192.168.10.0/24 -d 192.168.20.0/24 -j ACCEPT
+
+# Allow forwarding from net20 to net10 (optional)
+sudo iptables -A FORWARD -s 192.168.20.0/24 -d 192.168.10.0/24 -j ACCEPT
+
+# Default deny forwarding
+sudo iptables -P FORWARD DROP
+sudo iptables -P INPUT ACCEPT
+sudo iptables -P OUTPUT ACCEPT
+
+Test and observation:
+From a host in 192.168.10.0/24, try to ping or ssh to a host in 192.168.20.0/24. It should succeed only if the FORWARD rules allow it.
+If you remove the specific FORWARD accepts and leave default DROP, forwarding stops.
+Revert:
+sudo sysctl -w net.ipv4.ip_forward=0
+sudo iptables -F
+sudo iptables -P FORWARD ACCEPT
+
+Processing order and a NAT example (PREROUTING/POSTROUTING)
+Demonstrate how NAT works using the nat table PREROUTING and POSTROUTING chains by performing source NAT (MASQUERADE).
+# Example: we have internal network on eth1 (192.168.50.0/24) and internet on eth0
+sudo iptables -t nat -A POSTROUTING -o eth0 -s 192.168.50.0/24 -j MASQUERADE
+
+# Allow forwarding as needed
+sudo sysctl -w net.ipv4.ip_forward=1
+sudo iptables -A FORWARD -s 192.168.50.0/24 -o eth0 -j ACCEPT
+sudo iptables -A FORWARD -d 192.168.50.0/24 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+Note: The nat POSTROUTING MASQUERADE rule rewrites source addresses of outgoing packets so return traffic will come back to the NAT gateway and be forwarded to the correct internal host.
+Test and observation:
+From an internal host, browse the internet — external servers will see requests from the gateway’s external IP address.
+Revert:
+		sudo iptables -t nat -F
+sudo iptables -F
+sudo sysctl -w net.ipv4.ip_forward=0
+
+
+Block Pings (ICMP Echo Requests)
+To block ping to your machine:
+sudo iptables -A INPUT -p icmp --icmp-type echo-request -j DROP
+To test:
+ping 192.168.1.x
+It should not respond.
+
+Packet Filtering Firewall (Legacy)
+Goal: Show that legacy firewall only blocks IP/Port, nothing more.
+Steps:
+On a Linux/Kali VM, run a simple web server:
+python3 -m http.server 8080
+From another machine, access:
+http://<server-ip>:8080
+Now create a packet filter rule (iptables example):
+sudo iptables -A INPUT -p tcp --dport 8080 -j DROP
+Test again → connection fails.
+
+Stateful Inspection Firewall
+Goal: Show that stateful firewall only allows return traffic for established connections.
+Steps with iptables conntrack:
+Allow ESTABLISHED traffic:
+sudo iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+Deny all new inbound traffic:
+sudo iptables -A INPUT -m conntrack --ctstate NEW -j DROP
+Ping or curl from client:
+curl http://<server-ip>
+It works only if the server initiated the connection earlier (depending on rule placement).
+Save iptables Rules
+On Debian/Ubuntu:
+sudo apt install iptables-persistent
+sudo netfilter-persistent save
+On Kali (systemd):
+sudo iptables-save > /etc/iptables.rules
+
+Xtables-Addons practical demo
+Install Xtables-Addons and demonstrate one practical addon feature that extends iptables functionality.
+Install addon package:
+sudo apt install xtables-addons-common xtables-addons-source
+Mirror packets to another host with TEE
+On monitoring host (say, 192.0.2.50), start packet capture:
+sudo tcpdump -i eth0 -w mirrored.pcap
+On gateway host, add a rule to tee (mirror) packets:
+sudo iptables -t mangle -A PREROUTING -d 192.168.50.10 -j TEE --gateway 192.0.2.50
+This duplicates packets and sends a copy to the monitoring host for analysis.
+Validate by generating traffic to 192.168.50.10 and observing mirrored.pcap capturing the copies.
+Remove the TEE rule when finished:
+sudo iptables -t mangle -D PREROUTING ... (match the exact rule or use line numbers)
+
+GeoIP match: Block or allow traffic from a country code:
+Install the required modules and the raw GeoIP data source library.
+sudo apt update
+sudo apt install xtables-addons-dkms xtables-addons-common libtext-csv-xs-perl
+
+The GeoIP modules need a specific location for the compiled database files.
+sudo mkdir -p /usr/share/xt_geoip
+The builder script requires the raw data to be in your current directory under the exact name dbip-country-lite.csv.
+Download the latest compressed file:
+wget https://download.db-ip.com/free/dbip-country-lite-2025-11.csv.gz
+Decompress and Rename the file:
+	gzip -d dbip-country-lite-2025-11.csv.gz
+mv dbip-country-lite-2025-11.csv dbip-country-lite.csv
+
+Next compile CSV data into the binary .iv4 (IPv4) and .iv6 (IPv6) files needed by the kernel module. Run this command from the directory where dbip-country-lite.csv is located.
+
+		sudo /usr/libexec/xtables-addons/xt_geoip_build -D /usr/share/xt_geoip
+
+Load the Kernel Module:
+	Additional steps : 
+		sudo apt install linux-headers-$(uname -r)
+
+sudo apt install module-assistant
+sudo m-a prepare
+
+ sudo m-a build xtables-addons
+sudo m-a install xtables-addons
+
+ 	sudo modprobe xt_geoip
+
+Block Outgoing Connections (Local 🡪 China): Prevents browsing, pings, or connections to Chinese servers.
+
+		sudo iptables -I OUTPUT 1 -m geoip --dst-cc CN -j DROP
+
+Block Incoming Connections (China 🡪 Local): Prevents connection attempts from China to any service running on your machine.
+
+		sudo iptables -I INPUT 1 -m geoip --src-cc CN -j DROP
+
+Similarly for blocking IPv6 traffic:
+		sudo ip6tables -I OUTPUT 1 -m geoip --dst-cc CN -j DROP
+		sudo ip6tables -I INPUT 1 -m geoip --src-cc CN -j DROP
+
+Check that your rules are loaded and in the correct order:
+
+		sudo iptables -L INPUT -n --line-numbers
+sudo ip6tables -L INPUT -n --line-numbers
+
+Make Rules Persistent (Survival Across Reboots)
+Install the persistence service:
+sudo apt install iptables-persistent
+Save the current active rules:
+		sudo sh -c 'iptables-save > /etc/iptables/rules.v4' 
+sudo sh -c 'ip6tables-save > /etc/iptables/rules.v6'
+
+Your GeoIP blocking is now fully configured for both IPv4 and IPv6.
+
+Find a Test IP Address
+Let's use a known IPv4 address in a mainland China range: 180.76.76.76 (often used by China Unicom).
+Run the test command:
+ping 180.76.76.76
+
+How to View Geoblocking Logs?
+
+You need to insert a rule that uses the LOG target to write an entry to the kernel log (dmesg or /var/log/syslog) before the packet is dropped.
+
+You will need to re-insert the GeoIP rules, putting a LOG rule immediately before each DROP rule. Since we are using -I (Insert at the top), we need to insert the DROP rule first, and then the LOG rule right before it.
+
+First, clean up the existing GeoIP rules:
+
+sudo iptables -D OUTPUT 1
+sudo iptables -D INPUT 1
+sudo ip6tables -D OUTPUT 1
+sudo ip6tables -D INPUT 1
+
+Next, add the LOG and DROP rules:
+
+sudo iptables -I OUTPUT 1 -m geoip --dst-cc CN -j LOG --log-prefix "GEO_DROP_OUT: "
+sudo iptables -I OUTPUT 2 -m geoip --dst-cc CN -j DROP
+
+sudo ip6tables -I OUTPUT 1 -m geoip --dst-cc CN -j LOG --log-prefix "GEO_DROP_OUT6: "
+sudo ip6tables -I OUTPUT 2 -m geoip --dst-cc CN -j DROP
+
+After you add the logging rules, try to ping 180.76.76.76 again. The successful block will now generate a log entry you can view in the kernel ring buffer.
+You can view the new log entries using the dmesg command and filtering for your custom prefix:
+dmesg | grep "GEO_DROP_OUT"
+
+
+Automating iptables with Bash scripting
+
+Copy firewall.sh to your Kali VM at /usr/local/sbin.
+		sudo chmod +x /usr/local/sbin/firewall.sh
+
+Go through the script to understand it.
+		sudo nano /usr/local/sbin/firewall.sh
+Key variables at the top: $RULES_FILE (/etc/iptables.rules) and external interface name (script assumes eth0 for NAT; change that if your external interface is different).
+
+Run the script:
+
+sudo /usr/local/sbin/firewall.sh start
+
+What it does:
+Backs up current iptables to /var/backups/iptables_lab/
+Flushes rules, sets default policies to DROP
+Adds loopback, established/related rules (stateful inspection)
+Allows basic outbound services (DNS, HTTP, HTTPS, NTP)
+Adds NAT MASQUERADE on eth0 (change if needed)
+Adds logging and drop rules
+Saves the rules to /etc/iptables.rules
+
+Verify rules and conntrack:
+		sudo /usr/local/sbin/firewall.sh status
+
+Check conntrack entries:
+		sudo conntrack -L | less	
+	(Install conntrack with sudo apt install conntrack if missing.)
+
+Test connectivity :
+From the firewall machine:
+sudo /usr/local/sbin/firewall.sh test
+
+From a client (another VM or your laptop on the same LAN), verify:
+DNS resolution works
+Web browsing works (HTTP/HTTPS)
+
+Stop firewall and recover:
+		sudo /usr/local/sbin/firewall.sh stop
+
+Save & Auto-restore on boot:
+To make rules persist across boots:
+		sudo cp iptables-restore.service /etc/systemd/system/iptables-restore.service
+		sudo systemctl daemon-reload
+sudo systemctl enable iptables-restore.service
+
+
+Internet Sharing Using iptables
+
+Enable Packet Forwarding
+Packet forwarding allows Kali to act as a router:
+	echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
+
+Make it permanent:
+	echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf
+
+Configure NAT (Masquerading)
+NAT hides client IP addresses behind Kali.
+Assume your internet-facing interface is eth0:
+	sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+This ensures the client’s traffic is rewritten correctly and gets internet access.
+
+Allow Forwarding Through the Firewall
+You must permit NEW and ESTABLISHED client connections:
+		sudo iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+sudo iptables -A FORWARD -m conntrack --ctstate NEW -j ACCEPT
+This converts your firewall into a working router with SPI (stateful) behavior.
+
+Set the Client to Use Kali as Default Gateway
+Windows: Set via IPv4 properties
+Linux:
+sudo ip route replace default via 192.168.x.y
+Now all client traffic goes through Kali.
+
+Test Internet Sharing
+	Test DNS:
+nslookup google.com
+Test Web Browsing:
+curl -I https://google.com
+Test Ping to External IP:
+ping 8.8.8.8
+All these demonstrate successful routing and NAT operation by your iptables firewall.
+
+Save Your iptables Rules
+		sudo iptables-save | sudo tee /etc/iptables.rules
+To auto-restore at boot, enable the systemd service:
+	sudo systemctl enable iptables-restore.service
+sudo systemctl start iptables-restore.service
+
+iptables port forwarding
+
+Your network:
+
+
+
+
+Machine
+Purpose
+IP
+Kali #1
+Firewall with iptables
+192.168.1.17
+Kali #2
+Internal server (SSH target)
+192.168.1.13
+Windows 10
+Client
+192.168.1.6
+
+
+
+
+
+
+
+
+
+
+
+
+Overview of the lab
+You will configure:
+On Kali #1 (192.168.1.17) → act as firewall
+Enable forwarding
+Add DNAT port-forwarding rule
+Add FORWARD chain rules
+OPTIONAL: Enable NAT
+Save rules
+On Kali #2 (192.168.1.13) → act as internal SSH/web server
+Start an SSH service (or simple nc listener for demo)
+On Windows 10 (192.168.1.6) → act as client
+Connect to forwarded port on Kali #1
+Verify it reaches Kali #2
+
+Kali#1 configuration:
+
+Enable IP forwarding
+sudo sysctl -w net.ipv4.ip_forward=1
+echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf
+
+
+
+
+
+
+
+
+
+
+
+Enable NAT
+	sudo iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE  
+		(Replace eth0 with actual external interface)
+
+Forward port 2222 on firewall → port 22 on internal Kali #2
+	sudo iptables -t nat -A PREROUTING -p tcp -d 192.168.1.17 --dport 2222 -j DNAT --to-destination 192.168.1.13:22
+
+Allow NEW SSH connections to Kali#2
+	sudo iptables -A FORWARD -p tcp -d 192.168.1.13 --dport 22 -m conntrack --ctstate NEW,ESTABLISHED -j ACCEPT
+
+Allow return traffic
+	sudo iptables -A FORWARD -p tcp -s 192.168.1.13 --sport 22 -m conntrack --ctstate ESTABLISHED -j ACCEPT
+
+Save iptables rules (optional)
+	sudo iptables-save | sudo tee /etc/iptables.rules
+
+Kali#2 configuration:
+
+	sudo systemctl start ssh
+sudo systemctl enable ssh
+
+From Windows client:
+		ssh 192.168.1.13
+	Connect to Kali #1 on forwarded port 2222
+		ssh -p 2222 user@192.168.1.17
+	
+You will be connected to 192.168.1.13 using port forwarding on Kali#1.
+
+Test & Verification:
+		sudo iptables -t nat -nL PREROUTING --line-numbers
+		sudo conntrack -L | grep 192.168.1.13
+	
+
+Iptables use case: Fail2ban 
+	
+Fail2ban is a security tool for Linux that automatically bans IP addresses when they fail to authenticate too many times. If someone tries to brute-force your SSH, FTP, web login, etc., Fail2ban will detect it and block their IP using iptables. It protects your system by watching log files (like /var/log/auth.log) and adding temporary iptables DROP rules for attackers.
+
+Fail2ban workflow (very simple):
+Someone tries to login to SSH with wrong password
+Fail2ban sees multiple failures in /var/log/auth.log
+After (example) 3 failures, Fail2ban: adds an iptables rule to block that IP and bans the IP for a certain time (example ban = 10 minutes).
+The attacker cannot try again
+After ban time ends, Fail2ban removes the rule automatically
+Thus Fail2ban used iptables and provides automation on top of it.
+
+We will use the same IP forwarding setup (refer to previous experiment) for this lab also.
+
+Note: When firewall DNAT forwards port 2222 to the internal server’s port 22, the internal server still sees the client source IP, so Fail2ban will ban the real offender.
+
+On Internal Kali#2 (192.168.1.13) — install & configure Fail2ban:
+
+Create/modify local jail config (never edit /etc/fail2ban/jail.conf directly; use jail.local or /etc/fail2ban/jail.d/)
+		sudo tee /etc/fail2ban/jail.d/sshd.local > /dev/null <<'EOF'
+[sshd]
+enabled = true
+port    = ssh
+filter  = sshd
+logpath = /var/log/auth.log
+maxretry = 3
+findtime = 600
+bantime = 300
+action = iptables-multiport[name=SSH, port="ssh", protocol=tcp]
+EOF
+
+Restart/enable fail2ban
+		sudo systemctl restart fail2ban
+sudo systemctl enable fail2ban
+
+Expected output from status sshd will show Enabled: true and Banned IP list : (initially empty).
+
+Ensure SSH logs are generated — try a successful SSH login locally to see log activity:
+
+	# from 192.168.1.13 itself:
+ssh localhost
+# then exit, and check logs
+sudo tail -n 20 /var/log/auth.log
+
+You should see sshd login entries. Fail2ban monitors this file.
+
+On Firewall Kali#1 (192.168.1.17) — nothing special required for Fail2ban to work.
+
+From Windows (PowerShell with OpenSSH client installed) run repeated bad logins:
+
+	# Try 4 failed attempts (fail2ban set to ban after 3)
+ssh user@192.168.1.17 -p 2222
+# enter wrong password 3 times
+
+After you hit maxretry, check fail2ban status
+sudo fail2ban-client status sshd
+You should see your Windows IP listed in Banned IP list.
+Check iptables chains added by Fail2ban
+		sudo iptables -nL --line-numbers
+sudo iptables -nL f2b-SSH --line-numbers
+
+
+
+
+
+
+
+
+
+
+
+
